@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 export function SignupPage() {
   const { user, profile, loading, signUp } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const from = location.state?.from?.pathname;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
@@ -42,7 +44,9 @@ export function SignupPage() {
       setEmailConfirmMessage(true);
       return;
     }
-    const dest = role === 'contractor' ? '/dashboard' : '/scan';
+    const dest = role === 'contractor'
+      ? '/dashboard'
+      : from && from.startsWith('/scan/') ? from : '/scan';
     navigate(dest, { replace: true });
   }
 
@@ -57,6 +61,7 @@ export function SignupPage() {
           </p>
           <Link
             to="/login"
+            state={location.state}
             className="mt-6 inline-block text-sm font-medium text-emerald-400 hover:text-emerald-300"
           >
             Back to sign in
@@ -209,6 +214,7 @@ export function SignupPage() {
             Already registered?{' '}
             <Link
               to="/login"
+              state={location.state}
               className="font-medium text-emerald-400 hover:text-emerald-300"
             >
               Sign in
