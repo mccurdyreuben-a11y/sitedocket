@@ -9,10 +9,15 @@ export function LogoutButton({ className = '' }) {
 
   async function handleClick() {
     setPending(true);
-    const { error } = await signOut();
-    setPending(false);
-    if (!error) {
-      navigate('/login', { replace: true });
+    try {
+      const { error } = await signOut();
+      if (!error) {
+        navigate('/login', { replace: true });
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPending(false);
     }
   }
 

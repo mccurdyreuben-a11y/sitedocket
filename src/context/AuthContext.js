@@ -21,6 +21,22 @@ async function fetchProfile(userId) {
   return data;
 }
 
+async function upsertUserProfile({ id, email, name, companyName, role }) {
+  const { error } = await supabase.from('users').upsert(
+    {
+      id,
+      email,
+      name,
+      company_name: companyName || null,
+      role,
+    },
+    { onConflict: 'id' }
+  );
+
+  if (error) throw error;
+  return fetchProfile(id);
+}
+
 /** Create profile row from auth user_metadata (used after email confirmation). */
 async function ensureUserProfileFromMetadata(user) {
   const meta = user.user_metadata || {};
@@ -28,28 +44,17 @@ async function ensureUserProfileFromMetadata(user) {
   const role = meta.role;
   if (!name || !role) return null;
 
-  const { error } = await supabase.from('users').insert({
+  return upsertUserProfile({
     id: user.id,
     email: user.email,
     name,
-    company_name: meta.company_name || null,
+    companyName: meta.company_name || null,
     role,
   });
-
-  if (error) {
-    if (error.code === '23505') {
-      return fetchProfile(user.id);
-    }
-    throw error;
-  }
-
-  return fetchProfile(user.id);
 }
 
-async function loadProfileForCurrentUser() {
-  const { data: { user }, error: userError } = await supabase.auth.getUser();
-  if (userError || !user?.id) return null;
-
+async function loadProfileForUser(user) {
+  if (!user?.id) return null;
   let p = await fetchProfile(user.id);
   if (p) return p;
 
@@ -62,47 +67,65 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   const refreshProfile = useCallback(async () => {
-    const p = await loadProfileForCurrentUser();
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser();
+    if (error || !user?.id) {
+      setProfile(null);
+      return null;
+    }
+    const p = await loadProfileForUser(user);
     setProfile(p);
     return p;
   }, []);
 
   useEffect(() => {
     let mounted = true;
-
-    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
+    const applyAuthState = async (s) => {
       if (!mounted) return;
+
       setSession(s);
-      if (s?.user) {
-        try {
-          const p = await loadProfileForCurrentUser();
-          if (mounted) setProfile(p);
-        } catch (e) {
-          console.error(e);
-          if (mounted) setProfile(null);
-        }
-      } else {
+
+      if (!s?.user) {
         setProfile(null);
+        setLoading(false);
+        return;
       }
-      if (mounted) setLoading(false);
-    });
+
+      try {
+        const p = await loadProfileForUser(s.user);
+        if (mounted) setProfile(p);
+      } catch (e) {
+        console.error(e);
+        if (mounted) setProfile(null);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+
+    const initializeSession = async () => {
+      try {
+        const {
+          data: { session: s },
+        } = await supabase.auth.getSession();
+        await applyAuthState(s);
+      } catch (e) {
+        console.error(e);
+        if (mounted) {
+          setSession(null);
+          setProfile(null);
+          setLoading(false);
+        }
+      }
+    };
+
+    void initializeSession();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, s) => {
-      setSession(s);
-      if (s?.user) {
-        try {
-          const p = await loadProfileForCurrentUser();
-          setProfile(p);
-        } catch (e) {
-          console.error(e);
-          setProfile(null);
-        }
-      } else {
-        setProfile(null);
-      }
-      setLoading(false);
+    } = supabase.auth.onAuthStateChange((_event, s) => {
+      void applyAuthState(s);
     });
 
     return () => {
@@ -135,15 +158,22 @@ export function AuthProvider({ children }) {
     });
     if (error) return { error, needsEmailConfirmation: false };
 
+    const authUser = data.user || data.session?.user;
+    if (authUser?.id) {
+      try {
+        await upsertUserProfile({
+          id: authUser.id,
+          email,
+          name: fullName,
+          companyName: companyName || null,
+          role,
+        });
+      } catch (profileError) {
+        return { error: profileError, needsEmailConfirmation: false };
+      }
+    }
+
     if (data.session?.user) {
-      const { error: insertError } = await supabase.from('users').insert({
-        id: data.user.id,
-        email,
-        name: fullName,
-        company_name: companyName || null,
-        role,
-      });
-      if (insertError) return { error: insertError, needsEmailConfirmation: false };
       await refreshProfile();
       return { error: null, needsEmailConfirmation: false };
     }
@@ -152,12 +182,15 @@ export function AuthProvider({ children }) {
   }, [refreshProfile]);
 
   const signOut = useCallback(async () => {
-    const { error } = await supabase.auth.signOut();
-    if (!error) {
+    try {
+      const { error } = await supabase.auth.signOut();
+      return { error };
+    } finally {
+      // Always clear local auth state so UI doesn't hang
       setProfile(null);
       setSession(null);
+      setLoading(false);
     }
-    return { error };
   }, []);
 
   const value = useMemo(
