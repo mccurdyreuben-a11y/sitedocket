@@ -139,6 +139,14 @@ export function ScanSitePage() {
       }
 
       if (!data) {
+        // With RLS, unauthenticated reads may return 0 rows rather than an explicit
+        // permission error. In that case, keep the scan flow alive and prompt login.
+        if (!user) {
+          setSiteError('');
+          setSite(null);
+          setLoadingSite(false);
+          return;
+        }
         setSiteError('Site not found for this QR code.');
         setLoadingSite(false);
         return;
