@@ -65,7 +65,8 @@ export function ScanSitePage() {
     if (!siteId) return '';
     const decoded = decodeURIComponent(siteId).trim();
     const bracketMatch = decoded.match(/^\[(.+)\]$/);
-    return bracketMatch ? bracketMatch[1] : decoded;
+    const unwrapped = bracketMatch ? bracketMatch[1] : decoded;
+    return unwrapped.replace(/-qr$/i, '');
   }, [siteId]);
 
   const initializePad = useCallback(() => {
