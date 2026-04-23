@@ -7,12 +7,13 @@ export function SignupPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const from = location.state?.from?.pathname;
+  const defaultRoleFromRoute = from?.startsWith('/scan/') ? 'sub' : 'contractor';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [role, setRole] = useState(
-    /** @type {'contractor' | 'sub'} */ ('contractor')
+    /** @type {'contractor' | 'sub'} */ (defaultRoleFromRoute)
   );
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
