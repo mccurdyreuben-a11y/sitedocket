@@ -22,6 +22,17 @@ const DELAY_CATEGORIES = [
   'Other',
 ];
 
+function getErrorMessage(err, fallback) {
+  if (!err) return fallback;
+  if (typeof err === 'string') return err;
+  if (typeof err.message === 'string' && err.message.trim()) return err.message;
+  if (typeof err.error_description === 'string' && err.error_description.trim()) {
+    return err.error_description;
+  }
+  if (typeof err.details === 'string' && err.details.trim()) return err.details;
+  return fallback;
+}
+
 function formatToday() {
   return new Intl.DateTimeFormat(undefined, {
     weekday: 'short',
@@ -166,6 +177,10 @@ export function ScanSitePage() {
   const handleSubmit = useCallback(
     async (e) => {
       e.preventDefault();
+      const trimmedWorkDescription = form.workDescription.trim();
+      const trimmedDelayDescription = form.delayDescription.trim();
+      const parsedHours = Number(form.hoursOnSite);
+
       if (!user || !profile) {
         setSubmitError('Please sign in before submitting a docket.');
         return;
@@ -182,7 +197,15 @@ export function ScanSitePage() {
         setSubmitError('Please add your digital signature.');
         return;
       }
-      if (form.hasDelay && !form.delayDescription.trim()) {
+      if (!trimmedWorkDescription) {
+        setSubmitError('Please add a description of work done.');
+        return;
+      }
+      if (!Number.isFinite(parsedHours) || parsedHours < 0) {
+        setSubmitError('Please enter valid hours on site.');
+        return;
+      }
+      if (form.hasDelay && !trimmedDelayDescription) {
         setSubmitError('Add a delay description when delay is marked Yes.');
         return;
       }
@@ -207,21 +230,21 @@ export function ScanSitePage() {
         const signatureDataUrl = padRef.current.toDataURL('image/png');
         const payload = {
           site_id: site.id,
-          subcontractor_id: profile.id,
+          subcontractor_id: user.id,
           submitted_by_auth_user_id: user.id,
           trade_type: form.tradeType,
-          work_description: form.workDescription.trim(),
-          hours_on_site: Number(form.hoursOnSite),
+          work_description: trimmedWorkDescription,
+          hours_on_site: parsedHours,
           has_delay: form.hasDelay,
           delay_category: form.hasDelay ? form.delayCategory : null,
-          delay_description: form.hasDelay ? form.delayDescription.trim() : null,
+          delay_description: form.hasDelay ? trimmedDelayDescription : null,
           delay_photo_url: delayPhotoUrl,
           signature_data_url: signatureDataUrl,
           status: 'submitted',
           work_date: new Date().toISOString().slice(0, 10),
         };
 
-        const { error } = await supabase.from('dockets').insert(payload);
+        const { error } = await supabase.from('dockets').insert(payload).select('id').single();
         if (error) throw error;
 
         setSubmitSuccess('Docket submitted successfully.');
@@ -237,7 +260,7 @@ export function ScanSitePage() {
         clearSignature();
       } catch (err) {
         console.error(err);
-        setSubmitError(err.message || 'Could not submit docket.');
+        setSubmitError(getErrorMessage(err, 'Could not submit docket.'));
       } finally {
         setSubmitting(false);
       }
