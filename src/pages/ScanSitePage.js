@@ -61,6 +61,12 @@ export function ScanSitePage() {
     }),
     [location.pathname]
   );
+  const normalizedSiteId = useMemo(() => {
+    if (!siteId) return '';
+    const decoded = decodeURIComponent(siteId).trim();
+    const bracketMatch = decoded.match(/^\[(.+)\]$/);
+    return bracketMatch ? bracketMatch[1] : decoded;
+  }, [siteId]);
 
   const initializePad = useCallback(() => {
     const canvas = canvasRef.current;
@@ -97,7 +103,7 @@ export function ScanSitePage() {
 
   useEffect(() => {
     async function fetchSite() {
-      if (!siteId) {
+      if (!normalizedSiteId) {
         setSiteError('Invalid site link.');
         setLoadingSite(false);
         return;
@@ -109,10 +115,22 @@ export function ScanSitePage() {
       const { data, error } = await supabase
         .from('sites')
         .select('id, name, address')
-        .eq('id', siteId)
+        .eq('id', normalizedSiteId)
         .maybeSingle();
 
       if (error) {
+        const maybePermissionError =
+          error.code === '42501' ||
+          /row-level security|permission denied|not allowed/i.test(error.message || '');
+
+        // If the user is not signed in yet, still show the login/register panel
+        // instead of a hard error screen.
+        if (!user && maybePermissionError) {
+          setSiteError('');
+          setSite(null);
+          setLoadingSite(false);
+          return;
+        }
         console.error(error);
         setSiteError(error.message || 'Could not load site.');
         setLoadingSite(false);
@@ -130,7 +148,7 @@ export function ScanSitePage() {
     }
 
     void fetchSite();
-  }, [siteId]);
+  }, [normalizedSiteId, user]);
 
   const clearSignature = useCallback(() => {
     padRef.current?.clear();
