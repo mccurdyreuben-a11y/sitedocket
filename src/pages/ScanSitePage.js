@@ -80,38 +80,56 @@ export function ScanSitePage() {
     return unwrapped.replace(/-qr$/i, '');
   }, [siteId]);
 
-  const initializePad = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ratio = Math.max(window.devicePixelRatio || 1, 1);
-    const width = canvas.offsetWidth;
-    const height = 200;
-    canvas.width = width * ratio;
-    canvas.height = height * ratio;
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-
-    const context = canvas.getContext('2d');
-    if (!context) return;
-    context.setTransform(ratio, 0, 0, ratio, 0, 0);
-
-    if (!padRef.current) {
-      padRef.current = new SignaturePad(canvas, {
-        minWidth: 1,
-        maxWidth: 2.5,
-        penColor: '#0f172a',
-      });
-    } else {
-      padRef.current.clear();
-    }
-  }, []);
-
+  // Initialise (and tear down) the SignaturePad only once the form, and
+  // therefore the <canvas>, is actually mounted in the DOM. The earlier
+  // implementation ran `initializePad` on first mount when the page was
+  // still showing the loading spinner, so canvasRef.current was null and
+  // SignaturePad was never constructed — which is why the pad couldn't be
+  // drawn on. Depending on the conditions that gate the form render
+  // guarantees the canvas exists when this effect fires.
   useEffect(() => {
-    initializePad();
-    window.addEventListener('resize', initializePad);
-    return () => window.removeEventListener('resize', initializePad);
-  }, [initializePad]);
+    if (loading || loadingSite || siteError || !user || !profile) {
+      return undefined;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+
+    const resizeCanvas = () => {
+      const ratio = Math.max(window.devicePixelRatio || 1, 1);
+      const width = canvas.offsetWidth || 300;
+      const height = 200;
+      canvas.width = width * ratio;
+      canvas.height = height * ratio;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.scale(ratio, ratio);
+      // Resetting canvas.width/height wipes any current strokes, so reset
+      // signature_pad's internal point buffer to match the now-blank canvas.
+      padRef.current?.clear();
+    };
+
+    resizeCanvas();
+
+    const pad = new SignaturePad(canvas, {
+      minWidth: 1,
+      maxWidth: 2.5,
+      penColor: '#0f172a',
+      backgroundColor: 'rgb(255, 255, 255)',
+    });
+    padRef.current = pad;
+
+    window.addEventListener('resize', resizeCanvas);
+
+    return () => {
+      window.removeEventListener('resize', resizeCanvas);
+      pad.off();
+      if (padRef.current === pad) {
+        padRef.current = null;
+      }
+    };
+  }, [loading, loadingSite, siteError, user, profile]);
 
   useEffect(() => {
     async function fetchSite() {
@@ -542,7 +560,11 @@ export function ScanSitePage() {
               </button>
             </div>
             <div className="rounded-lg border border-slate-700 bg-white p-2">
-              <canvas ref={canvasRef} className="w-full rounded" />
+              <canvas
+                ref={canvasRef}
+                className="block w-full rounded"
+                style={{ touchAction: 'none', height: 200 }}
+              />
             </div>
           </section>
 
