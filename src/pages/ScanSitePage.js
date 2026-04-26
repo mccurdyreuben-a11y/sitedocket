@@ -177,61 +177,87 @@ export function ScanSitePage() {
   const handleSubmit = useCallback(
     async (e) => {
       e.preventDefault();
-      const trimmedWorkDescription = form.workDescription.trim();
-      const trimmedDelayDescription = form.delayDescription.trim();
-      const parsedHours = Number(form.hoursOnSite);
+      e.stopPropagation();
 
-      if (!user || !profile) {
-        setSubmitError('Please sign in before submitting a docket.');
-        return;
-      }
-      if (profile.role !== 'sub') {
-        setSubmitError('Only subcontractor accounts can submit dockets from this page.');
-        return;
-      }
-      if (!site?.id) {
-        setSubmitError('Site is missing. Reload and try again.');
-        return;
-      }
-      if (!padRef.current || padRef.current.isEmpty()) {
-        setSubmitError('Please add your digital signature.');
-        return;
-      }
-      if (!trimmedWorkDescription) {
-        setSubmitError('Please add a description of work done.');
-        return;
-      }
-      if (!Number.isFinite(parsedHours) || parsedHours < 0) {
-        setSubmitError('Please enter valid hours on site.');
-        return;
-      }
-      if (form.hasDelay && !trimmedDelayDescription) {
-        setSubmitError('Add a delay description when delay is marked Yes.');
-        return;
-      }
+      console.log('[ScanSitePage] Submit clicked');
 
-      setSubmitting(true);
       setSubmitError('');
       setSubmitSuccess('');
+      setSubmitting(true);
 
       try {
+        const trimmedWorkDescription = form.workDescription.trim();
+        const trimmedDelayDescription = form.delayDescription.trim();
+        const parsedHours = Number(form.hoursOnSite);
+
+        if (!user || !profile) {
+          throw new Error('Please sign in before submitting a docket.');
+        }
+        if (profile.role !== 'sub') {
+          throw new Error(
+            'Only subcontractor accounts can submit dockets from this page.'
+          );
+        }
+        if (!site?.id) {
+          throw new Error('Site is missing. Reload and try again.');
+        }
+        if (!padRef.current || padRef.current.isEmpty()) {
+          throw new Error('Please add your digital signature.');
+        }
+        if (!trimmedWorkDescription) {
+          throw new Error('Please add a description of work done.');
+        }
+        if (!Number.isFinite(parsedHours) || parsedHours < 0) {
+          throw new Error('Please enter valid hours on site.');
+        }
+        if (form.hasDelay && !trimmedDelayDescription) {
+          throw new Error('Add a delay description when delay is marked Yes.');
+        }
+
+        // Re-verify the auth session right before insert, so an expired token
+        // doesn't cause the request to silently fail under RLS.
+        const { data: authData, error: authError } =
+          await supabase.auth.getUser();
+        if (authError) {
+          console.error('[ScanSitePage] auth.getUser error', authError);
+          throw new Error('Your session has expired. Please sign in again.');
+        }
+        const authUserId = authData?.user?.id;
+        if (!authUserId) {
+          throw new Error('Your session has expired. Please sign in again.');
+        }
+
         let delayPhotoUrl = null;
         if (form.hasDelay && delayPhoto) {
-          const ext = delayPhoto.name.split('.').pop()?.toLowerCase() || 'jpg';
-          const filePath = `${site.id}/${user.id}/${Date.now()}.${ext}`;
+          const ext =
+            delayPhoto.name.split('.').pop()?.toLowerCase() || 'jpg';
+          const filePath = `${site.id}/${authUserId}/${Date.now()}.${ext}`;
+          console.log('[ScanSitePage] uploading delay photo', filePath);
           const { error: uploadError } = await supabase.storage
             .from('docket-delays')
             .upload(filePath, delayPhoto, { upsert: false });
-          if (uploadError) throw uploadError;
-          const { data: publicData } = supabase.storage.from('docket-delays').getPublicUrl(filePath);
+          if (uploadError) {
+            console.error('[ScanSitePage] storage upload error', uploadError);
+            throw uploadError;
+          }
+          const { data: publicData } = supabase.storage
+            .from('docket-delays')
+            .getPublicUrl(filePath);
           delayPhotoUrl = publicData?.publicUrl || filePath;
         }
 
-        const signatureDataUrl = padRef.current.toDataURL('image/png');
+        let signatureDataUrl;
+        try {
+          signatureDataUrl = padRef.current.toDataURL('image/png');
+        } catch (sigErr) {
+          console.error('[ScanSitePage] signature export failed', sigErr);
+          throw new Error('Could not read the signature. Please re-sign.');
+        }
+
         const payload = {
           site_id: site.id,
-          subcontractor_id: user.id,
-          submitted_by_auth_user_id: user.id,
+          subcontractor_id: authUserId,
+          submitted_by_auth_user_id: authUserId,
           trade_type: form.tradeType,
           work_description: trimmedWorkDescription,
           hours_on_site: parsedHours,
@@ -239,13 +265,33 @@ export function ScanSitePage() {
           delay_category: form.hasDelay ? form.delayCategory : null,
           delay_description: form.hasDelay ? trimmedDelayDescription : null,
           delay_photo_url: delayPhotoUrl,
-          signature_data: signatureDataUrl,
+          // The dockets table column is `signature_data_url` (see
+          // supabase_schema.sql). Do NOT rename without also running a
+          // migration — otherwise the insert will fail with a column or
+          // not-null violation.
+          signature_data_url: signatureDataUrl,
           status: 'submitted',
           work_date: new Date().toISOString().slice(0, 10),
         };
 
-        const { error } = await supabase.from('dockets').insert(payload).select('id').single();
-        if (error) throw error;
+        console.log('[ScanSitePage] inserting docket', {
+          ...payload,
+          signature_data_url: `<base64 ${signatureDataUrl.length} chars>`,
+        });
+
+        // Note: using `.select('id')` (without `.single()`) so an RLS-filtered
+        // post-insert read can't masquerade as a generic "no rows" error.
+        const { data: insertData, error: insertError } = await supabase
+          .from('dockets')
+          .insert(payload)
+          .select('id');
+
+        if (insertError) {
+          console.error('[ScanSitePage] insert error', insertError);
+          throw insertError;
+        }
+
+        console.log('[ScanSitePage] insert ok', insertData);
 
         setSubmitSuccess('Docket submitted successfully.');
         setForm({
@@ -259,8 +305,14 @@ export function ScanSitePage() {
         setDelayPhoto(null);
         clearSignature();
       } catch (err) {
-        console.error(err);
-        setSubmitError(getErrorMessage(err, 'Could not submit docket.'));
+        console.error('[ScanSitePage] submit failed', err);
+        const message = getErrorMessage(err, 'Could not submit docket.');
+        setSubmitError(message);
+        // Make sure the user actually sees the message even if they're
+        // scrolled to the bottom of a long form.
+        if (typeof window !== 'undefined') {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
       } finally {
         setSubmitting(false);
       }
@@ -493,6 +545,17 @@ export function ScanSitePage() {
               <canvas ref={canvasRef} className="w-full rounded" />
             </div>
           </section>
+
+          {submitError ? (
+            <div className="rounded-lg border border-rose-900/50 bg-rose-950/50 px-3 py-2 text-sm text-rose-200">
+              {submitError}
+            </div>
+          ) : null}
+          {submitSuccess ? (
+            <div className="rounded-lg border border-emerald-900/50 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-200">
+              {submitSuccess}
+            </div>
+          ) : null}
 
           <button
             type="submit"
