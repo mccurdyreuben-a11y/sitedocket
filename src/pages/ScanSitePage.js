@@ -239,7 +239,7 @@ export function ScanSitePage() {
           delay_category: form.hasDelay ? form.delayCategory : null,
           delay_description: form.hasDelay ? trimmedDelayDescription : null,
           delay_photo_url: delayPhotoUrl,
-          signature_data_url: signatureDataUrl,
+          signature_data: signatureDataUrl,
           status: 'submitted',
           work_date: new Date().toISOString().slice(0, 10),
         };
