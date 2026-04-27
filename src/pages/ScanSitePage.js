@@ -249,17 +249,19 @@ export function ScanSitePage() {
         if (form.hasDelay && delayPhoto) {
           const ext =
             delayPhoto.name.split('.').pop()?.toLowerCase() || 'jpg';
-          const filePath = `${site.id}/${authUserId}/${Date.now()}.${ext}`;
+          // Path layout `<auth_uid>/<filename>` is required by the
+          // `Dockets_upload_authenticated` storage policy.
+          const filePath = `${authUserId}/${Date.now()}.${ext}`;
           console.log('[ScanSitePage] uploading delay photo', filePath);
           const { error: uploadError } = await supabase.storage
-            .from('docket-delays')
+            .from('Dockets')
             .upload(filePath, delayPhoto, { upsert: false });
           if (uploadError) {
             console.error('[ScanSitePage] storage upload error', uploadError);
             throw uploadError;
           }
           const { data: publicData } = supabase.storage
-            .from('docket-delays')
+            .from('Dockets')
             .getPublicUrl(filePath);
           delayPhotoUrl = publicData?.publicUrl || filePath;
         }
@@ -272,10 +274,12 @@ export function ScanSitePage() {
           throw new Error('Could not read the signature. Please re-sign.');
         }
 
+        // Only columns that exist in `public.dockets`. `status`, `work_date`,
+        // `created_at`, and `id` are filled in by Postgres defaults so we
+        // don't send them from the client.
         const payload = {
           site_id: site.id,
           subcontractor_id: authUserId,
-          submitted_by_auth_user_id: authUserId,
           trade_type: form.tradeType,
           work_description: trimmedWorkDescription,
           hours_on_site: parsedHours,
@@ -283,13 +287,7 @@ export function ScanSitePage() {
           delay_category: form.hasDelay ? form.delayCategory : null,
           delay_description: form.hasDelay ? trimmedDelayDescription : null,
           delay_photo_url: delayPhotoUrl,
-          // The dockets table column is `signature_data_url` (see
-          // supabase_schema.sql). Do NOT rename without also running a
-          // migration — otherwise the insert will fail with a column or
-          // not-null violation.
           signature_data_url: signatureDataUrl,
-          status: 'submitted',
-          work_date: new Date().toISOString().slice(0, 10),
         };
 
         console.log('[ScanSitePage] inserting docket', {
