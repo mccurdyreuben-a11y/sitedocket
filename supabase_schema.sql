@@ -40,7 +40,11 @@ create table if not exists public.dockets (
   delay_description text,
   delay_photo_url text,
   signature_data_url text not null,
-  status text not null default 'submitted',
+  status text not null default 'submitted'
+    check (status in ('submitted', 'approved', 'flagged')),
+  flag_note text,
+  reviewed_at timestamptz,
+  reviewed_by uuid references public.users(id) on delete set null,
   work_date date not null default current_date,
   created_at timestamptz not null default now(),
   constraint delay_fields_consistent check (
@@ -157,4 +161,61 @@ with check (
   bucket_id = 'docket-delays'
   and (storage.foldername(name))[1] is not null
   and (storage.foldername(name))[2] = auth.uid()::text
+);
+
+-- ---------------------------------------------------------------------------
+-- Approval flow: contractor reviews dockets for their own sites.
+-- Re-runnable additive migrations for installs that pre-date these columns.
+-- ---------------------------------------------------------------------------
+alter table public.dockets
+  add column if not exists flag_note text;
+alter table public.dockets
+  add column if not exists reviewed_at timestamptz;
+alter table public.dockets
+  add column if not exists reviewed_by uuid references public.users(id) on delete set null;
+
+-- Drop the old default check (if any) and re-apply the constrained set.
+alter table public.dockets
+  drop constraint if exists dockets_status_check;
+alter table public.dockets
+  add constraint dockets_status_check
+  check (status in ('submitted', 'approved', 'flagged'));
+
+-- Contractors can update dockets that belong to their sites.
+-- Subcontractors are still gated to read-only on their own rows
+-- (handled by the existing select policy).
+drop policy if exists "dockets_update_contractor_by_site" on public.dockets;
+create policy "dockets_update_contractor_by_site" on public.dockets
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.sites s
+    where s.id = dockets.site_id and s.contractor_id = auth.uid()
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.sites s
+    where s.id = dockets.site_id and s.contractor_id = auth.uid()
+  )
+);
+
+-- Contractors need to read the submitting subcontractor's profile row
+-- (name, company) to render the dockets list. Without this they only see
+-- their own users row because of "users_select_self".
+drop policy if exists "users_select_contractors_view_subs" on public.users;
+create policy "users_select_contractors_view_subs" on public.users
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.dockets d
+    join public.sites s on s.id = d.site_id
+    where d.subcontractor_id = users.id
+      and s.contractor_id = auth.uid()
+  )
 );

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
 import { LogoutButton } from '../components/LogoutButton';
 import { useAuth } from '../context/AuthContext';
@@ -172,8 +173,14 @@ export function DashboardPage() {
     if (normalized.includes('approved')) {
       return { label: 'Latest: Approved', tone: 'text-emerald-200 bg-emerald-700/40' };
     }
+    if (normalized.includes('flagged')) {
+      return { label: 'Latest: Flagged', tone: 'text-orange-200 bg-orange-700/40' };
+    }
     if (normalized.includes('rejected')) {
       return { label: 'Latest: Rejected', tone: 'text-rose-200 bg-rose-700/40' };
+    }
+    if (normalized.includes('submitted')) {
+      return { label: 'Latest: Pending Review', tone: 'text-amber-200 bg-amber-700/40' };
     }
     return { label: `Latest: ${rawStatus}`, tone: 'text-amber-200 bg-amber-700/40' };
   }, [todayStatusBySite]);
@@ -269,6 +276,13 @@ export function DashboardPage() {
                     <p className="text-xs text-slate-400">Dockets Today</p>
                     <p className="mt-1 text-2xl font-semibold text-white">{todayCount}</p>
                   </div>
+
+                  <Link
+                    to={`/site/${site.id}/dockets`}
+                    className="mb-4 block w-full rounded-lg bg-emerald-600 px-3 py-2 text-center text-sm font-semibold text-white transition hover:bg-emerald-500"
+                  >
+                    Review Dockets
+                  </Link>
 
                   <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
                     <p className="mb-3 text-xs font-medium text-slate-400">Site QR</p>

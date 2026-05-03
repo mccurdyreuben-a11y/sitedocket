@@ -8,6 +8,7 @@ import { LoginPage } from './pages/LoginPage';
 import { ScanPage } from './pages/ScanPage';
 import { ScanSitePage } from './pages/ScanSitePage';
 import { SignupPage } from './pages/SignupPage';
+import { SiteDocketsPage } from './pages/SiteDocketsPage';
 
 function App() {
   return (
@@ -23,6 +24,14 @@ function App() {
             element={
               <ProtectedRoute allowedRole="contractor">
                 <DashboardPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/site/:siteId/dockets"
+            element={
+              <ProtectedRoute allowedRole="contractor">
+                <SiteDocketsPage />
               </ProtectedRoute>
             }
           />
