@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { LogoutButton } from '../components/LogoutButton';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabaseClient';
+import { generateAndUploadDocketPdf } from '../lib/docketPdf';
 
 const STATUS_FILTERS = [
   { id: 'submitted', label: 'Pending' },
@@ -43,15 +44,6 @@ function getErrorMessage(err, fallback) {
   return fallback;
 }
 
-/**
- * Hook for the contractor PDF generation step.
- * Replace this stub with the real call (e.g. invoke a Supabase Edge Function)
- * once that work lands.
- */
-async function triggerPdfGeneration(docketId) {
-  // TODO: wire up real PDF generation here.
-  console.log('[SiteDocketsPage] PDF generation queued for docket', docketId);
-}
 
 export function SiteDocketsPage() {
   const { siteId } = useParams();
@@ -71,6 +63,7 @@ export function SiteDocketsPage() {
   const [pendingAction, setPendingAction] = useState({}); // { [docketId]: 'approve' | 'flag' }
   const [actionError, setActionError] = useState({});     // { [docketId]: string }
   const [flagDraft, setFlagDraft] = useState({});         // { [docketId]: { open: boolean, note: string } }
+  const [pdfState, setPdfState] = useState({});           // { [docketId]: 'pending' | 'error' }
   const [previewSig, setPreviewSig] = useState(null);     // data URL string
   const [previewPhoto, setPreviewPhoto] = useState(null); // url string
 
@@ -117,7 +110,7 @@ export function SiteDocketsPage() {
       .select(
         `id, site_id, subcontractor_id, trade_type, work_description,
          hours_on_site, has_delay, signature_data_url, status, flag_note,
-         reviewed_at, reviewed_by, work_date, created_at,
+         reviewed_at, reviewed_by, work_date, created_at, pdf_url,
          subcontractor:users!dockets_sub_id_fkey(id, name, company_name),
          delays(category, description, photo_url, created_at)`
       )
@@ -173,6 +166,18 @@ export function SiteDocketsPage() {
     setDockets((prev) => prev.map((d) => (d.id === docketId ? { ...d, ...patch } : d)));
   }, []);
 
+  const setPdfStateFor = useCallback((docketId, state) => {
+    setPdfState((prev) => {
+      if (state == null) {
+        if (!(docketId in prev)) return prev;
+        const next = { ...prev };
+        delete next[docketId];
+        return next;
+      }
+      return { ...prev, [docketId]: state };
+    });
+  }, []);
+
   const handleApprove = useCallback(
     async (docket) => {
       clearActionErrorFor(docket.id);
@@ -185,43 +190,75 @@ export function SiteDocketsPage() {
         reviewed_by: docket.reviewed_by,
       };
       const reviewedAt = new Date().toISOString();
-
-      // Optimistic update so the UI feels instant.
-      updateLocalDocket(docket.id, {
+      const approvedPatch = {
         status: 'approved',
         flag_note: null,
         reviewed_at: reviewedAt,
         reviewed_by: profile?.id || null,
-      });
+      };
+
+      // Optimistic update so the UI feels instant.
+      updateLocalDocket(docket.id, approvedPatch);
 
       try {
         const { error } = await supabase
           .from('dockets')
-          .update({
-            status: 'approved',
-            flag_note: null,
-            reviewed_at: reviewedAt,
-            reviewed_by: profile?.id || null,
-          })
+          .update(approvedPatch)
           .eq('id', docket.id);
 
         if (error) throw error;
-
-        // Hand off to PDF pipeline (no-op stub for now).
-        void triggerPdfGeneration(docket.id);
       } catch (err) {
         console.error('[SiteDocketsPage] approve failed', err);
         updateLocalDocket(docket.id, previousSnapshot);
         setActionErrorFor(docket.id, getErrorMessage(err, 'Could not approve docket.'));
-      } finally {
         setPendingAction((prev) => {
           const next = { ...prev };
           delete next[docket.id];
           return next;
         });
+        return;
+      }
+
+      setPendingAction((prev) => {
+        const next = { ...prev };
+        delete next[docket.id];
+        return next;
+      });
+
+      // Approval persisted — now build the PDF. We deliberately don't roll
+      // back the approval if PDF generation fails; the approval itself is
+      // the source of truth, and the PDF can be regenerated.
+      setPdfStateFor(docket.id, 'pending');
+      try {
+        const approvedDocket = {
+          ...docket,
+          ...approvedPatch,
+        };
+        const pdfUrl = await generateAndUploadDocketPdf({
+          docket: approvedDocket,
+          site,
+          delays: Array.isArray(docket.delays) ? docket.delays : [],
+          approver: profile,
+        });
+        updateLocalDocket(docket.id, { pdf_url: pdfUrl });
+        setPdfStateFor(docket.id, null);
+      } catch (err) {
+        console.error('[SiteDocketsPage] PDF generation failed', err);
+        setPdfStateFor(docket.id, 'error');
+        setActionErrorFor(
+          docket.id,
+          getErrorMessage(err, 'Approved, but PDF generation failed.')
+        );
       }
     },
-    [clearActionErrorFor, profile?.id, setActionErrorFor, updateLocalDocket]
+    [
+      clearActionErrorFor,
+      profile,
+      setActionErrorFor,
+      setPdfStateFor,
+      site,
+      updateLocalDocket,
+    ]
   );
 
   const openFlagForm = useCallback(
@@ -416,6 +453,7 @@ export function SiteDocketsPage() {
             const action = pendingAction[docket.id];
             const draft = flagDraft[docket.id];
             const errMsg = actionError[docket.id];
+            const pdfStatus = pdfState[docket.id];
 
             return (
               <li
@@ -531,10 +569,35 @@ export function SiteDocketsPage() {
                         : 'border-orange-900/40 bg-orange-950/30 text-orange-200'
                     }`}
                   >
-                    <p className="font-medium">
-                      {status === 'approved' ? 'Approved' : 'Flagged'} on{' '}
-                      {formatDateTime(docket.reviewed_at)}
-                    </p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-medium">
+                        {status === 'approved' ? 'Approved' : 'Flagged'} on{' '}
+                        {formatDateTime(docket.reviewed_at)}
+                      </p>
+                      {status === 'approved' ? (
+                        <div className="flex items-center gap-2">
+                          {pdfStatus === 'pending' ? (
+                            <span className="inline-flex items-center gap-1.5 text-emerald-200/80">
+                              <span className="h-2.5 w-2.5 animate-spin rounded-full border border-emerald-300 border-t-transparent" />
+                              Generating PDF…
+                            </span>
+                          ) : null}
+                          {docket.pdf_url ? (
+                            <a
+                              href={docket.pdf_url}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="inline-flex items-center gap-1 rounded-md border border-emerald-700/60 bg-emerald-900/40 px-2.5 py-1 text-xs font-semibold text-emerald-100 hover:bg-emerald-800/50"
+                            >
+                              View PDF
+                            </a>
+                          ) : null}
+                          {pdfStatus === 'error' && !docket.pdf_url ? (
+                            <span className="text-rose-300">PDF failed</span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                     {status === 'flagged' && docket.flag_note ? (
                       <p className="mt-1 whitespace-pre-wrap text-orange-100/90">
                         {`\u201C${docket.flag_note}\u201D`}
