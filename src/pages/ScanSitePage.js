@@ -276,7 +276,8 @@ export function ScanSitePage() {
 
         // Only columns that exist in `public.dockets`. `status`, `work_date`,
         // `created_at`, and `id` are filled in by Postgres defaults so we
-        // don't send them from the client.
+        // don't send them from the client. Delay details now live in the
+        // `public.delays` table and are inserted in a second step below.
         const payload = {
           site_id: site.id,
           subcontractor_id: authUserId,
@@ -284,9 +285,6 @@ export function ScanSitePage() {
           work_description: trimmedWorkDescription,
           hours_on_site: parsedHours,
           has_delay: form.hasDelay,
-          delay_category: form.hasDelay ? form.delayCategory : null,
-          delay_description: form.hasDelay ? trimmedDelayDescription : null,
-          delay_photo_url: delayPhotoUrl,
           signature_data_url: signatureDataUrl,
         };
 
@@ -295,19 +293,55 @@ export function ScanSitePage() {
           signature_data_url: `<base64 ${signatureDataUrl.length} chars>`,
         });
 
-        // Note: using `.select('id')` (without `.single()`) so an RLS-filtered
-        // post-insert read can't masquerade as a generic "no rows" error.
         const { data: insertData, error: insertError } = await supabase
           .from('dockets')
           .insert(payload)
-          .select('id');
+          .select('id')
+          .single();
 
         if (insertError) {
           console.error('[ScanSitePage] insert error', insertError);
           throw insertError;
         }
 
+        const newDocketId = insertData?.id;
         console.log('[ScanSitePage] insert ok', insertData);
+
+        if (form.hasDelay) {
+          if (!newDocketId) {
+            throw new Error('Docket was saved but its id was not returned.');
+          }
+
+          const delayPayload = {
+            docket_id: newDocketId,
+            category: form.delayCategory,
+            description: trimmedDelayDescription,
+            photo_url: delayPhotoUrl,
+          };
+
+          console.log('[ScanSitePage] inserting delay', delayPayload);
+
+          const { error: delayError } = await supabase
+            .from('delays')
+            .insert(delayPayload);
+
+          if (delayError) {
+            console.error('[ScanSitePage] delay insert error', delayError);
+            // Roll back the docket so we don't leave an orphan with
+            // has_delay = true and no matching delays row.
+            const { error: cleanupError } = await supabase
+              .from('dockets')
+              .delete()
+              .eq('id', newDocketId);
+            if (cleanupError) {
+              console.error(
+                '[ScanSitePage] failed to roll back docket after delay insert error',
+                cleanupError
+              );
+            }
+            throw delayError;
+          }
+        }
 
         setSubmitSuccess('Docket submitted successfully.');
         setForm({

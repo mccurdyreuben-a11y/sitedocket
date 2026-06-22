@@ -110,14 +110,16 @@ export function SiteDocketsPage() {
 
     // Embedding the related users row works because
     // dockets.subcontractor_id is a foreign key to public.users(id).
+    // Delay details now live in public.delays (FK delays.docket_id ->
+    // dockets.id) and are pulled in via the relational select.
     const { data, error } = await supabase
       .from('dockets')
       .select(
         `id, site_id, subcontractor_id, trade_type, work_description,
-         hours_on_site, has_delay, delay_category, delay_description,
-         delay_photo_url, signature_data_url, status, flag_note,
+         hours_on_site, has_delay, signature_data_url, status, flag_note,
          reviewed_at, reviewed_by, work_date, created_at,
-         subcontractor:users!dockets_sub_id_fkey(id, name, company_name)`
+         subcontractor:users!dockets_sub_id_fkey(id, name, company_name),
+         delays(category, description, photo_url, created_at)`
       )
       .eq('site_id', siteId)
       .order('created_at', { ascending: false });
@@ -466,32 +468,37 @@ export function SiteDocketsPage() {
                   </p>
                 </div>
 
-                {docket.has_delay ? (
-                  <div className="mt-4 rounded-lg border border-rose-900/40 bg-rose-950/20 p-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-rose-300">
-                      Delay
-                      {docket.delay_category ? ` \u00b7 ${docket.delay_category}` : ''}
-                    </p>
-                    {docket.delay_description ? (
-                      <p className="mt-1 whitespace-pre-wrap text-sm text-rose-100/90">
-                        {docket.delay_description}
-                      </p>
-                    ) : null}
-                    {docket.delay_photo_url ? (
-                      <button
-                        type="button"
-                        onClick={() => setPreviewPhoto(docket.delay_photo_url)}
-                        className="mt-3 block overflow-hidden rounded-md border border-rose-900/40"
+                {docket.has_delay && Array.isArray(docket.delays) && docket.delays.length > 0
+                  ? docket.delays.map((delay, idx) => (
+                      <div
+                        key={`${docket.id}-delay-${idx}`}
+                        className="mt-4 rounded-lg border border-rose-900/40 bg-rose-950/20 p-3"
                       >
-                        <img
-                          src={docket.delay_photo_url}
-                          alt="Delay evidence"
-                          className="h-36 w-full object-cover"
-                        />
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
+                        <p className="text-xs font-semibold uppercase tracking-wide text-rose-300">
+                          Delay
+                          {delay.category ? ` \u00b7 ${delay.category}` : ''}
+                        </p>
+                        {delay.description ? (
+                          <p className="mt-1 whitespace-pre-wrap text-sm text-rose-100/90">
+                            {delay.description}
+                          </p>
+                        ) : null}
+                        {delay.photo_url ? (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewPhoto(delay.photo_url)}
+                            className="mt-3 block overflow-hidden rounded-md border border-rose-900/40"
+                          >
+                            <img
+                              src={delay.photo_url}
+                              alt="Delay evidence"
+                              className="h-36 w-full object-cover"
+                            />
+                          </button>
+                        ) : null}
+                      </div>
+                    ))
+                  : null}
 
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <div className="flex items-center gap-2">
