@@ -117,7 +117,7 @@ export function SiteDocketsPage() {
          hours_on_site, has_delay, delay_category, delay_description,
          delay_photo_url, signature_data_url, status, flag_note,
          reviewed_at, reviewed_by, work_date, created_at,
-         subcontractor:users!dockets_subcontractor_id_fkey(id, name, company_name)`
+         subcontractor:users!dockets_sub_id_fkey(id, name, company_name)`
       )
       .eq('site_id', siteId)
       .order('created_at', { ascending: false });
