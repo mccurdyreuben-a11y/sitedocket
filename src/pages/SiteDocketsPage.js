@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { jsPDF } from 'jspdf';
 import { LogoutButton } from '../components/LogoutButton';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabaseClient';
-import { generateAndUploadDocketPdf } from '../lib/docketPdf';
 
 const STATUS_FILTERS = [
   { id: 'submitted', label: 'Pending' },
@@ -18,6 +18,15 @@ const STATUS_BADGE = {
   flagged: 'bg-orange-700/40 text-orange-200',
 };
 
+// Supabase Storage bucket that holds approved docket PDFs.
+// Must exist and have public-read access for the returned URL to work.
+const PDF_BUCKET = 'Dockets';
+
+const PDF_MARGIN = 15; // mm
+const PDF_FOOTER_HEIGHT = 22; // mm reserved for the disclaimer
+const PDF_DISCLAIMER =
+  'This document is an operational site record only. It does not constitute a contractual claim, legal certification, or formal notice of any kind. Accuracy of records is the sole responsibility of the parties involved.';
+
 function formatDateTime(iso) {
   if (!iso) return '';
   return new Intl.DateTimeFormat(undefined, {
@@ -29,11 +38,32 @@ function formatDateTime(iso) {
   }).format(new Date(iso));
 }
 
+function formatLongDate(iso) {
+  const d = iso ? new Date(iso) : new Date();
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    }).format(d);
+  } catch {
+    return d.toDateString();
+  }
+}
+
 function formatHours(value) {
   if (value === null || value === undefined) return '0h';
   const n = Number(value);
   if (!Number.isFinite(n)) return `${value}h`;
   return `${n.toFixed(n % 1 === 0 ? 0 : 2)}h`;
+}
+
+function formatHoursLong(value) {
+  if (value === null || value === undefined || value === '') return '\u2014';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return `${value}`;
+  return `${n.toFixed(n % 1 === 0 ? 0 : 2)} h`;
 }
 
 function getErrorMessage(err, fallback) {
@@ -42,6 +72,361 @@ function getErrorMessage(err, fallback) {
   if (typeof err.message === 'string' && err.message.trim()) return err.message;
   if (typeof err.details === 'string' && err.details.trim()) return err.details;
   return fallback;
+}
+
+// Fetch any URL (or pass-through data URL) and resolve to a data URL so
+// jsPDF can embed it. Returns null when the image cannot be loaded so
+// PDF generation never hard-fails on a missing photo.
+async function fetchAsDataUrl(url) {
+  if (!url) return null;
+  if (typeof url === 'string' && url.startsWith('data:')) return url;
+  try {
+    const res = await fetch(url, { mode: 'cors' });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  } catch (err) {
+    console.warn('[SiteDocketsPage] could not fetch image for PDF', url, err);
+    return null;
+  }
+}
+
+function imageFormatFromDataUrl(dataUrl) {
+  const m = /^data:image\/([a-zA-Z0-9.+-]+);base64,/i.exec(dataUrl || '');
+  const fmt = (m?.[1] || 'PNG').toUpperCase();
+  return fmt === 'JPG' ? 'JPEG' : fmt;
+}
+
+function ensureRoom(doc, neededMm, cursor) {
+  const pageHeight = doc.internal.pageSize.getHeight();
+  if (cursor + neededMm > pageHeight - PDF_FOOTER_HEIGHT) {
+    doc.addPage();
+    return PDF_MARGIN + 5;
+  }
+  return cursor;
+}
+
+function drawWrappedText(doc, text, x, y, maxWidth, lineHeight = 5) {
+  const lines = doc.splitTextToSize(String(text ?? ''), maxWidth);
+  lines.forEach((line, i) => {
+    doc.text(line, x, y + i * lineHeight);
+  });
+  return y + lines.length * lineHeight;
+}
+
+function drawSectionHeader(doc, title, y) {
+  const pageW = doc.internal.pageSize.getWidth();
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.setTextColor(30, 41, 59);
+  doc.text(title, PDF_MARGIN, y);
+  doc.setDrawColor(226, 232, 240);
+  doc.setLineWidth(0.4);
+  doc.line(PDF_MARGIN, y + 1.5, pageW - PDF_MARGIN, y + 1.5);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  return y + 8;
+}
+
+function drawKeyValue(doc, label, value, x, y, maxWidth) {
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(100, 116, 139);
+  doc.text(String(label).toUpperCase(), x, y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  return drawWrappedText(doc, value ?? '\u2014', x, y + 5, maxWidth);
+}
+
+function drawFooterOnAllPages(doc) {
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const totalPages = doc.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.line(PDF_MARGIN, pageH - 18, pageW - PDF_MARGIN, pageH - 18);
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    const lines = doc.splitTextToSize(PDF_DISCLAIMER, pageW - 2 * PDF_MARGIN);
+    lines.forEach((line, idx) => {
+      doc.text(line, PDF_MARGIN, pageH - 14 + idx * 3.5);
+    });
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Page ${i} of ${totalPages}`, pageW - PDF_MARGIN, pageH - 6, {
+      align: 'right',
+    });
+  }
+}
+
+// Build the docket PDF as a Blob. Pure-ish: takes already-loaded data and
+// returns a Blob, so it can be tested and reused without re-hitting Supabase.
+async function buildDocketPdfBlob({ docket, site, delays, approver }) {
+  if (!docket) throw new Error('buildDocketPdfBlob: docket is required.');
+
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const contentW = pageW - 2 * PDF_MARGIN;
+  let y = PDF_MARGIN + 5;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(22);
+  doc.setTextColor(16, 122, 87);
+  doc.text('SiteDocket', PDF_MARGIN, y);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(71, 85, 105);
+  doc.text(
+    formatLongDate(docket.work_date || docket.created_at),
+    pageW - PDF_MARGIN,
+    y,
+    { align: 'right' }
+  );
+
+  y += 7;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.setTextColor(15, 23, 42);
+  doc.text(site?.name || 'Site', PDF_MARGIN, y);
+
+  if (site?.address) {
+    y += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    drawWrappedText(doc, site.address, PDF_MARGIN, y, contentW);
+  }
+
+  y += 8;
+  doc.setDrawColor(16, 122, 87);
+  doc.setLineWidth(0.8);
+  doc.line(PDF_MARGIN, y, pageW - PDF_MARGIN, y);
+  y += 8;
+
+  // Section 1: Work Record
+  y = drawSectionHeader(doc, '1. Work Record', y);
+
+  const sub = docket.subcontractor || {};
+  const colW = (contentW - 8) / 2;
+  const col2X = PDF_MARGIN + colW + 8;
+
+  const leftY1 = drawKeyValue(doc, 'Subcontractor', sub.name || '\u2014', PDF_MARGIN, y, colW);
+  const rightY1 = drawKeyValue(doc, 'Company', sub.company_name || '\u2014', col2X, y, colW);
+  y = Math.max(leftY1, rightY1) + 4;
+
+  const leftY2 = drawKeyValue(doc, 'Trade', docket.trade_type || '\u2014', PDF_MARGIN, y, colW);
+  const rightY2 = drawKeyValue(
+    doc,
+    'Hours on Site',
+    formatHoursLong(docket.hours_on_site),
+    col2X,
+    y,
+    colW
+  );
+  y = Math.max(leftY2, rightY2) + 4;
+
+  y = drawKeyValue(
+    doc,
+    'Work Description',
+    docket.work_description || '\u2014',
+    PDF_MARGIN,
+    y,
+    contentW
+  );
+  y += 6;
+
+  // Section 2: Delays (only when has_delay is true)
+  if (docket.has_delay) {
+    y = ensureRoom(doc, 18, y);
+    y = drawSectionHeader(doc, '2. Delays', y);
+
+    const delayRows = Array.isArray(delays) ? delays : [];
+    if (delayRows.length === 0) {
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(10);
+      doc.setTextColor(100, 116, 139);
+      doc.text('Delay reported, but no detail rows are on file.', PDF_MARGIN, y);
+      y += 8;
+    } else {
+      for (let i = 0; i < delayRows.length; i++) {
+        const d = delayRows[i];
+        y = ensureRoom(doc, 30, y);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.setTextColor(159, 18, 57);
+        doc.text(`Delay ${i + 1} \u00b7 ${d.category || 'Uncategorised'}`, PDF_MARGIN, y);
+        y += 5;
+
+        if (d.created_at) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(100, 116, 139);
+          doc.text(`Logged ${formatDateTime(d.created_at)}`, PDF_MARGIN, y);
+          y += 5;
+        }
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.setTextColor(15, 23, 42);
+        y = drawWrappedText(doc, d.description || '\u2014', PDF_MARGIN, y, contentW);
+        y += 2;
+
+        if (d.photo_url) {
+          const dataUrl = await fetchAsDataUrl(d.photo_url);
+          if (dataUrl) {
+            const imgW = 70;
+            const imgH = 50;
+            y = ensureRoom(doc, imgH + 6, y);
+            try {
+              doc.setDrawColor(226, 232, 240);
+              doc.setLineWidth(0.3);
+              doc.rect(PDF_MARGIN, y, imgW, imgH);
+              doc.addImage(
+                dataUrl,
+                imageFormatFromDataUrl(dataUrl),
+                PDF_MARGIN + 0.5,
+                y + 0.5,
+                imgW - 1,
+                imgH - 1,
+                undefined,
+                'FAST'
+              );
+              y += imgH + 4;
+            } catch (err) {
+              console.warn('[SiteDocketsPage] could not embed delay photo', err);
+            }
+          }
+        }
+        y += 4;
+      }
+    }
+  }
+
+  // Section 3 (or 2 if no delays): Signature
+  const sigSectionTitle = docket.has_delay ? '3. Signature' : '2. Signature';
+  y = ensureRoom(doc, 60, y);
+  y = drawSectionHeader(doc, sigSectionTitle, y);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(100, 116, 139);
+  doc.text('SUBCONTRACTOR SIGNATURE', PDF_MARGIN, y);
+  y += 4;
+
+  const signatureDataUrl = docket.signature_data_url
+    ? await fetchAsDataUrl(docket.signature_data_url)
+    : null;
+
+  if (signatureDataUrl) {
+    const sigW = 80;
+    const sigH = 32;
+    try {
+      doc.setDrawColor(203, 213, 225);
+      doc.setLineWidth(0.3);
+      doc.rect(PDF_MARGIN, y, sigW, sigH);
+      doc.addImage(
+        signatureDataUrl,
+        imageFormatFromDataUrl(signatureDataUrl),
+        PDF_MARGIN + 1,
+        y + 1,
+        sigW - 2,
+        sigH - 2
+      );
+      y += sigH + 3;
+    } catch (err) {
+      console.warn('[SiteDocketsPage] could not embed signature', err);
+      y += 5;
+    }
+  } else {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(10);
+    doc.setTextColor(100, 116, 139);
+    doc.text('(no signature on file)', PDF_MARGIN, y);
+    y += 8;
+  }
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  doc.text(sub.name || '\u2014', PDF_MARGIN, y);
+  if (sub.company_name) {
+    y += 4.5;
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(sub.company_name, PDF_MARGIN, y);
+  }
+  y += 10;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(100, 116, 139);
+  doc.text('APPROVED BY', PDF_MARGIN, y);
+  y += 5;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  doc.text(approver?.name || '\u2014', PDF_MARGIN, y);
+  if (approver?.company_name) {
+    y += 4.5;
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(approver.company_name, PDF_MARGIN, y);
+  }
+  y += 5;
+  doc.setFontSize(9);
+  doc.setTextColor(100, 116, 139);
+  doc.text(`Approved ${formatDateTime(docket.reviewed_at)}`, PDF_MARGIN, y);
+
+  drawFooterOnAllPages(doc);
+
+  return doc.output('blob');
+}
+
+// Generate the docket PDF, upload it to the `Dockets` bucket, and persist
+// the resulting public URL on `dockets.pdf_url`. Returns the public URL.
+async function generateAndUploadDocketPdf({ docket, site, delays, approver }) {
+  if (!docket?.id) throw new Error('generateAndUploadDocketPdf: docket.id missing.');
+
+  const blob = await buildDocketPdfBlob({ docket, site, delays, approver });
+
+  // Scope the storage path by auth user so RLS can restrict writes to the
+  // approving contractor's own folder.
+  const { data: authData, error: authError } = await supabase.auth.getUser();
+  if (authError) throw authError;
+  const uid = authData?.user?.id;
+  if (!uid) throw new Error('Not authenticated.');
+
+  const path = `${uid}/${docket.id}.pdf`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(PDF_BUCKET)
+    .upload(path, blob, {
+      contentType: 'application/pdf',
+      upsert: true,
+      cacheControl: '3600',
+    });
+  if (uploadError) throw uploadError;
+
+  const { data: pub } = supabase.storage.from(PDF_BUCKET).getPublicUrl(path);
+  const pdfUrl = pub?.publicUrl || path;
+
+  const { error: updateError } = await supabase
+    .from('dockets')
+    .update({ pdf_url: pdfUrl })
+    .eq('id', docket.id);
+  if (updateError) throw updateError;
+
+  return pdfUrl;
 }
 
 
@@ -103,7 +488,7 @@ export function SiteDocketsPage() {
 
     // Embedding the related users row works because
     // dockets.subcontractor_id is a foreign key to public.users(id).
-    // Delay details now live in public.delays (FK delays.docket_id ->
+    // Delay details live in public.delays (FK delays.docket_id ->
     // dockets.id) and are pulled in via the relational select.
     const { data, error } = await supabase
       .from('dockets')
@@ -225,9 +610,9 @@ export function SiteDocketsPage() {
         return next;
       });
 
-      // Approval persisted — now build the PDF. We deliberately don't roll
-      // back the approval if PDF generation fails; the approval itself is
-      // the source of truth, and the PDF can be regenerated.
+      // Approval persisted — now build and upload the PDF. We deliberately
+      // don't roll back the approval if PDF generation fails; the approval
+      // itself is the source of truth and the PDF can be regenerated.
       setPdfStateFor(docket.id, 'pending');
       try {
         const approvedDocket = {
