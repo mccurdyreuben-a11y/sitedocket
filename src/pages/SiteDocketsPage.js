@@ -395,36 +395,103 @@ async function buildDocketPdfBlob({ docket, site, delays, approver }) {
 // Generate the docket PDF, upload it to the `Dockets` bucket, and persist
 // the resulting public URL on `dockets.pdf_url`. Returns the public URL.
 async function generateAndUploadDocketPdf({ docket, site, delays, approver }) {
-  if (!docket?.id) throw new Error('generateAndUploadDocketPdf: docket.id missing.');
+  console.log('[PDF] generateAndUploadDocketPdf() entered', {
+    docketId: docket?.id,
+    siteId: site?.id,
+    siteName: site?.name,
+    delayCount: Array.isArray(delays) ? delays.length : 0,
+    hasSignature: Boolean(docket?.signature_data_url),
+    approverId: approver?.id,
+    bucket: PDF_BUCKET,
+  });
 
-  const blob = await buildDocketPdfBlob({ docket, site, delays, approver });
+  if (!docket?.id) {
+    console.error('[PDF] aborting: docket.id is missing');
+    throw new Error('generateAndUploadDocketPdf: docket.id missing.');
+  }
+
+  console.log('[PDF] step 1/5 — about to call buildDocketPdfBlob()');
+  let blob;
+  try {
+    blob = await buildDocketPdfBlob({ docket, site, delays, approver });
+  } catch (err) {
+    console.error('[PDF] buildDocketPdfBlob() threw', err);
+    throw err;
+  }
+  console.log('[PDF] step 1/5 — buildDocketPdfBlob() returned', {
+    type: blob?.type,
+    size: blob?.size,
+    isBlob: typeof Blob !== 'undefined' && blob instanceof Blob,
+  });
 
   // Scope the storage path by auth user so RLS can restrict writes to the
   // approving contractor's own folder.
+  console.log('[PDF] step 2/5 — calling supabase.auth.getUser()');
   const { data: authData, error: authError } = await supabase.auth.getUser();
-  if (authError) throw authError;
+  if (authError) {
+    console.error('[PDF] supabase.auth.getUser() returned error', authError);
+    throw authError;
+  }
   const uid = authData?.user?.id;
-  if (!uid) throw new Error('Not authenticated.');
+  console.log('[PDF] step 2/5 — auth user resolved', { uid });
+  if (!uid) {
+    console.error('[PDF] no authenticated user; cannot upload PDF');
+    throw new Error('Not authenticated.');
+  }
 
   const path = `${uid}/${docket.id}.pdf`;
+  console.log('[PDF] step 3/5 — about to upload to Supabase storage', {
+    bucket: PDF_BUCKET,
+    path,
+    size: blob?.size,
+  });
 
-  const { error: uploadError } = await supabase.storage
+  const uploadStart = performance.now();
+  const { data: uploadData, error: uploadError } = await supabase.storage
     .from(PDF_BUCKET)
     .upload(path, blob, {
       contentType: 'application/pdf',
       upsert: true,
       cacheControl: '3600',
     });
-  if (uploadError) throw uploadError;
+  const uploadMs = Math.round(performance.now() - uploadStart);
 
+  if (uploadError) {
+    console.error('[PDF] step 3/5 — storage upload FAILED', {
+      bucket: PDF_BUCKET,
+      path,
+      uploadMs,
+      error: uploadError,
+      message: uploadError?.message,
+      statusCode: uploadError?.statusCode,
+      name: uploadError?.name,
+    });
+    throw uploadError;
+  }
+  console.log('[PDF] step 3/5 — storage upload OK', {
+    bucket: PDF_BUCKET,
+    path,
+    uploadMs,
+    uploadData,
+  });
+
+  console.log('[PDF] step 4/5 — resolving public URL');
   const { data: pub } = supabase.storage.from(PDF_BUCKET).getPublicUrl(path);
   const pdfUrl = pub?.publicUrl || path;
+  console.log('[PDF] step 4/5 — public URL resolved', { pdfUrl });
 
+  console.log('[PDF] step 5/5 — persisting pdf_url on dockets row', {
+    docketId: docket.id,
+  });
   const { error: updateError } = await supabase
     .from('dockets')
     .update({ pdf_url: pdfUrl })
     .eq('id', docket.id);
-  if (updateError) throw updateError;
+  if (updateError) {
+    console.error('[PDF] step 5/5 — dockets row update FAILED', updateError);
+    throw updateError;
+  }
+  console.log('[PDF] step 5/5 — dockets.pdf_url persisted; returning', { pdfUrl });
 
   return pdfUrl;
 }
@@ -565,6 +632,13 @@ export function SiteDocketsPage() {
 
   const handleApprove = useCallback(
     async (docket) => {
+      console.log('[Approve] handleApprove() invoked', {
+        docketId: docket?.id,
+        currentStatus: docket?.status,
+        hasSiteLoaded: Boolean(site?.id),
+        profileId: profile?.id,
+      });
+
       clearActionErrorFor(docket.id);
       setPendingAction((prev) => ({ ...prev, [docket.id]: 'approve' }));
 
@@ -585,6 +659,11 @@ export function SiteDocketsPage() {
       // Optimistic update so the UI feels instant.
       updateLocalDocket(docket.id, approvedPatch);
 
+      console.log('[Approve] sending UPDATE to dockets table', {
+        docketId: docket.id,
+        patch: approvedPatch,
+      });
+
       try {
         const { error } = await supabase
           .from('dockets')
@@ -592,8 +671,9 @@ export function SiteDocketsPage() {
           .eq('id', docket.id);
 
         if (error) throw error;
+        console.log('[Approve] dockets UPDATE succeeded', { docketId: docket.id });
       } catch (err) {
-        console.error('[SiteDocketsPage] approve failed', err);
+        console.error('[Approve] dockets UPDATE failed; rolling back optimistic state', err);
         updateLocalDocket(docket.id, previousSnapshot);
         setActionErrorFor(docket.id, getErrorMessage(err, 'Could not approve docket.'));
         setPendingAction((prev) => {
@@ -613,22 +693,47 @@ export function SiteDocketsPage() {
       // Approval persisted — now build and upload the PDF. We deliberately
       // don't roll back the approval if PDF generation fails; the approval
       // itself is the source of truth and the PDF can be regenerated.
+      console.log('[Approve] about to call setPdfStateFor(pending)', {
+        docketId: docket.id,
+      });
       setPdfStateFor(docket.id, 'pending');
+
+      const approvedDocket = {
+        ...docket,
+        ...approvedPatch,
+      };
+      const delaysForPdf = Array.isArray(docket.delays) ? docket.delays : [];
+      console.log('[Approve] about to call generateAndUploadDocketPdf()', {
+        docketId: approvedDocket.id,
+        siteId: site?.id,
+        siteName: site?.name,
+        delayCount: delaysForPdf.length,
+        hasSignature: Boolean(approvedDocket.signature_data_url),
+      });
+
       try {
-        const approvedDocket = {
-          ...docket,
-          ...approvedPatch,
-        };
         const pdfUrl = await generateAndUploadDocketPdf({
           docket: approvedDocket,
           site,
-          delays: Array.isArray(docket.delays) ? docket.delays : [],
+          delays: delaysForPdf,
           approver: profile,
+        });
+        console.log('[Approve] generateAndUploadDocketPdf() resolved', {
+          docketId: docket.id,
+          pdfUrl,
         });
         updateLocalDocket(docket.id, { pdf_url: pdfUrl });
         setPdfStateFor(docket.id, null);
       } catch (err) {
-        console.error('[SiteDocketsPage] PDF generation failed', err);
+        console.error('[Approve] PDF generation/upload threw', {
+          docketId: docket.id,
+          name: err?.name,
+          message: err?.message,
+          statusCode: err?.statusCode,
+          details: err?.details,
+          stack: err?.stack,
+          error: err,
+        });
         setPdfStateFor(docket.id, 'error');
         setActionErrorFor(
           docket.id,
