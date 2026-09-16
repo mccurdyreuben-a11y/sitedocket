@@ -724,6 +724,34 @@ export function SiteDocketsPage() {
         });
         updateLocalDocket(docket.id, { pdf_url: pdfUrl });
         setPdfStateFor(docket.id, null);
+
+        // Fire-and-log the email send. We don't roll back approval or PDF
+        // generation on a mailer failure; the row + PDF remain valid and
+        // the user can retry from the row's "Resend email" action.
+        console.log('[Email] invoking send-docket-email edge function', {
+          docketId: docket.id,
+        });
+        try {
+          const { data: emailData, error: emailError } =
+            await supabase.functions.invoke('send-docket-email', {
+              body: { docketId: docket.id },
+            });
+          if (emailError) {
+            console.error('[Email] edge function returned an error', emailError);
+            setActionErrorFor(
+              docket.id,
+              getErrorMessage(emailError, 'Approved and saved, but email failed to send.')
+            );
+          } else {
+            console.log('[Email] edge function responded', emailData);
+          }
+        } catch (mailErr) {
+          console.error('[Email] edge function threw', mailErr);
+          setActionErrorFor(
+            docket.id,
+            getErrorMessage(mailErr, 'Approved and saved, but email failed to send.')
+          );
+        }
       } catch (err) {
         console.error('[Approve] PDF generation/upload threw', {
           docketId: docket.id,
