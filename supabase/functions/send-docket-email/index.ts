@@ -245,7 +245,7 @@ serve(async (req: Request) => {
       ? String(docket.work_date).slice(0, 10) // YYYY-MM-DD
       : new Date().toISOString().slice(0, 10);
 
-    const subject = `Site Docket - ${siteName} - ${workDate}`;
+    const subject = `${APP_NAME} - ${siteName} - ${workDate}`;
     const pdfFilename = `site-docket-${docket.id}.pdf`;
 
     const bodyFor = (recipientName: string | null | undefined) =>
