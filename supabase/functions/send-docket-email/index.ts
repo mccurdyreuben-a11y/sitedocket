@@ -14,6 +14,10 @@
 //   SUPABASE_URL                 - Provided automatically by the Supabase runtime.
 //   SUPABASE_ANON_KEY            - Provided automatically by the Supabase runtime.
 //   SUPABASE_SERVICE_ROLE_KEY    - Provided automatically by the Supabase runtime.
+//
+// Optional runtime secrets:
+//   APP_NAME                     - Product name used in the email signature.
+//                                  Defaults to "SiteDocket" when unset.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
@@ -107,6 +111,7 @@ serve(async (req: Request) => {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
     const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const APP_NAME = Deno.env.get("APP_NAME") || "SiteDocket";
 
     if (!RESEND_API_KEY) {
       return jsonResponse({ error: "Missing RESEND_API_KEY secret" }, 500);
@@ -254,7 +259,7 @@ serve(async (req: Request) => {
         "",
         "The approved docket is attached as a PDF for your records.",
         "",
-        "— SiteDocket",
+        `— ${APP_NAME}`,
       ].join("\n");
 
     // --- Send both emails --------------------------------------------------

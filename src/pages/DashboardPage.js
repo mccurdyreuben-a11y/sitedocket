@@ -4,6 +4,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import { LogoutButton } from '../components/LogoutButton';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabaseClient';
+import { BRAND } from '../brand';
 
 export function DashboardPage() {
   const { profile } = useAuth();
@@ -246,7 +247,7 @@ export function DashboardPage() {
         {!loadingSites && sites.length > 0 ? (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {sites.map((site) => {
-              const scanUrl = `https://sitedocket.io/scan/${site.id}`;
+              const scanUrl = `${BRAND.url}/scan/${site.id}`;
               const siteStatus = getSiteStatus(site.start_date);
               const docketStatus = getDocketStatus(site.id);
               const latestSubmission = getLatestSubmissionStatus(site.id);

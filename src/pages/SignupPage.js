@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { BRAND } from '../brand';
 
 export function SignupPage() {
   const { user, profile, loading, signUp } = useAuth();
@@ -79,7 +80,7 @@ export function SignupPage() {
           <h1 className="text-2xl font-semibold tracking-tight text-white">
             Create account
           </h1>
-          <p className="mt-1 text-sm text-slate-400">Join SiteDocket</p>
+          <p className="mt-1 text-sm text-slate-400">{`Join ${BRAND.name}`}</p>
         </div>
 
         <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-8 shadow-xl shadow-black/40">

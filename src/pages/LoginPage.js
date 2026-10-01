@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { BRAND } from '../brand';
 
 export function LoginPage() {
   const { user, profile, loading, signIn } = useAuth();
@@ -35,7 +36,7 @@ export function LoginPage() {
       <div className="mx-auto w-full max-w-md">
         <div className="mb-8 text-center">
           <h1 className="text-2xl font-semibold tracking-tight text-white">
-            SiteDocket
+            {BRAND.name}
           </h1>
           <p className="mt-1 text-sm text-slate-400">Sign in to your account</p>
         </div>

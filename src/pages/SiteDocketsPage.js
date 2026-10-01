@@ -4,6 +4,7 @@ import { jsPDF } from 'jspdf';
 import { LogoutButton } from '../components/LogoutButton';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabaseClient';
+import { BRAND } from '../brand';
 
 const STATUS_FILTERS = [
   { id: 'submitted', label: 'Pending' },
@@ -181,7 +182,7 @@ async function buildDocketPdfBlob({ docket, site, delays, approver }) {
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(22);
   doc.setTextColor(16, 122, 87);
-  doc.text('SiteDocket', PDF_MARGIN, y);
+  doc.text(BRAND.name, PDF_MARGIN, y);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
