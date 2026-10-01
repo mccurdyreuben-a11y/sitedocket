@@ -42,12 +42,152 @@ function formatToday() {
   }).format(new Date());
 }
 
+const DELAY_PHOTO_MAX_EDGE = 1600;
+const DELAY_PHOTO_JPEG_QUALITY = 0.8;
+const DELAY_PHOTO_TARGET_BYTES = 500 * 1024;
+
+function decodeImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      if (!image.naturalWidth || !image.naturalHeight) {
+        reject(new Error('undecodable'));
+        return;
+      }
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('undecodable'));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function drawScaledImage(image, scale) {
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  context.drawImage(image, 0, 0, width, height);
+  return canvas;
+}
+
+function canvasToJpegBlob(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error('Could not prepare the delay photo. Please try a different image.'));
+      },
+      'image/jpeg',
+      quality
+    );
+  });
+}
+
+// Resize so the longest side is at most 1600px and re-encode as JPEG.
+// If the result is still over ~500KB, step quality and scale down further.
+// Files the browser cannot decode are returned unchanged.
+async function prepareDelayPhoto(file) {
+  let image;
+  try {
+    image = await decodeImageFile(file);
+  } catch {
+    return file;
+  }
+
+  const longest = Math.max(image.naturalWidth, image.naturalHeight);
+  let scale = longest > DELAY_PHOTO_MAX_EDGE ? DELAY_PHOTO_MAX_EDGE / longest : 1;
+  let quality = DELAY_PHOTO_JPEG_QUALITY;
+  let canvas = drawScaledImage(image, scale);
+  if (!canvas) {
+    throw new Error('Could not prepare the delay photo. Please try a different image.');
+  }
+
+  let blob = await canvasToJpegBlob(canvas, quality);
+  let guard = 0;
+  while (blob.size > DELAY_PHOTO_TARGET_BYTES && guard < 10) {
+    guard += 1;
+    if (quality > 0.45) {
+      quality = Math.round((quality - 0.1) * 10) / 10;
+    } else {
+      scale *= 0.75;
+      const smaller = drawScaledImage(image, scale);
+      if (!smaller || Math.max(smaller.width, smaller.height) < 480) break;
+      canvas = smaller;
+      quality = 0.6;
+    }
+    blob = await canvasToJpegBlob(canvas, quality);
+  }
+
+  const baseName = (file.name || 'delay-photo').replace(/\.[^.]+$/, '') || 'delay-photo';
+  return new File([blob], `${baseName}.jpg`, {
+    type: 'image/jpeg',
+    lastModified: Date.now(),
+  });
+}
+
+async function uploadDelayPhoto(file) {
+  const cloudName = process.env.REACT_APP_CLOUDINARY_CLOUD_NAME;
+  const uploadPreset = process.env.REACT_APP_CLOUDINARY_UPLOAD_PRESET;
+  if (!cloudName || !uploadPreset) {
+    throw new Error(
+      'Delay photo upload is not configured. The docket was not submitted.'
+    );
+  }
+
+  const prepared = await prepareDelayPhoto(file);
+  const body = new FormData();
+  body.append('file', prepared);
+  body.append('upload_preset', uploadPreset);
+
+  let response;
+  try {
+    response = await fetch(
+      `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
+      { method: 'POST', body }
+    );
+  } catch (err) {
+    console.error('[ScanSitePage] delay photo upload network error', err);
+    throw new Error(
+      'Could not upload the delay photo. Check your connection and try again. The docket was not submitted.'
+    );
+  }
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  const secureUrl = payload?.secure_url;
+  if (!response.ok || typeof secureUrl !== 'string' || !secureUrl) {
+    const detail = payload?.error?.message;
+    console.error('[ScanSitePage] delay photo upload failed', payload);
+    throw new Error(
+      detail
+        ? `Could not upload the delay photo (${detail}). The docket was not submitted.`
+        : 'Could not upload the delay photo. The docket was not submitted. Please try again.'
+    );
+  }
+
+  return secureUrl;
+}
+
 export function ScanSitePage() {
   const { siteId } = useParams();
   const location = useLocation();
   const { user, profile, loading } = useAuth();
   const canvasRef = useRef(null);
   const padRef = useRef(null);
+  const delayPhotoInputRef = useRef(null);
 
   const [site, setSite] = useState(null);
   const [loadingSite, setLoadingSite] = useState(true);
@@ -56,6 +196,7 @@ export function ScanSitePage() {
   const [submitError, setSubmitError] = useState('');
   const [submitSuccess, setSubmitSuccess] = useState('');
   const [delayPhoto, setDelayPhoto] = useState(null);
+  const [delayPhotoPreviewUrl, setDelayPhotoPreviewUrl] = useState('');
 
   const [form, setForm] = useState({
     tradeType: TRADE_OPTIONS[0],
@@ -188,6 +329,16 @@ export function ScanSitePage() {
     void fetchSite();
   }, [normalizedSiteId, user]);
 
+  useEffect(() => {
+    if (!delayPhoto) {
+      setDelayPhotoPreviewUrl('');
+      return undefined;
+    }
+    const objectUrl = URL.createObjectURL(delayPhoto);
+    setDelayPhotoPreviewUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [delayPhoto]);
+
   const clearSignature = useCallback(() => {
     padRef.current?.clear();
   }, []);
@@ -247,23 +398,8 @@ export function ScanSitePage() {
 
         let delayPhotoUrl = null;
         if (form.hasDelay && delayPhoto) {
-          const ext =
-            delayPhoto.name.split('.').pop()?.toLowerCase() || 'jpg';
-          // Path layout `<auth_uid>/<filename>` is required by the
-          // `Dockets_upload_authenticated` storage policy.
-          const filePath = `${authUserId}/${Date.now()}.${ext}`;
-          console.log('[ScanSitePage] uploading delay photo', filePath);
-          const { error: uploadError } = await supabase.storage
-            .from('Dockets')
-            .upload(filePath, delayPhoto, { upsert: false });
-          if (uploadError) {
-            console.error('[ScanSitePage] storage upload error', uploadError);
-            throw uploadError;
-          }
-          const { data: publicData } = supabase.storage
-            .from('Dockets')
-            .getPublicUrl(filePath);
-          delayPhotoUrl = publicData?.publicUrl || filePath;
+          console.log('[ScanSitePage] uploading delay photo');
+          delayPhotoUrl = await uploadDelayPhoto(delayPhoto);
         }
 
         let signatureDataUrl;
@@ -353,6 +489,7 @@ export function ScanSitePage() {
           delayDescription: '',
         });
         setDelayPhoto(null);
+        if (delayPhotoInputRef.current) delayPhotoInputRef.current.value = '';
         clearSignature();
       } catch (err) {
         console.error('[ScanSitePage] submit failed', err);
@@ -567,6 +704,7 @@ export function ScanSitePage() {
                   </label>
                   <input
                     id="delay-photo"
+                    ref={delayPhotoInputRef}
                     type="file"
                     accept="image/*"
                     onChange={(e) => setDelayPhoto(e.target.files?.[0] || null)}
@@ -574,6 +712,13 @@ export function ScanSitePage() {
                   />
                   {delayPhoto ? (
                     <p className="mt-1 text-xs text-slate-400">Selected: {delayPhoto.name}</p>
+                  ) : null}
+                  {delayPhotoPreviewUrl ? (
+                    <img
+                      src={delayPhotoPreviewUrl}
+                      alt="Selected delay"
+                      className="mt-2 h-20 w-20 rounded-md border border-slate-700 object-cover"
+                    />
                   ) : null}
                 </div>
               </div>
